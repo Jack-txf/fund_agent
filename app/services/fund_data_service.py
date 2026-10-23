@@ -1,17 +1,15 @@
 import json
-import re
-import time
-import urllib.error
-import urllib.request
+import math
 from typing import Any, Protocol
+from datetime import datetime, timedelta
+from typing import Any
 
-from app.core.config import HTTP_RETRIES
 from app.graph.nodes.trends import summarize_trend
 
 
 class FundDataSource(Protocol):
     # 所有数据源都实现同一个方法：输入 6 位基金代码，输出统一结构。
-    # recognize 节点不关心数据来自本地 JSON 还是真实网络请求。
+    # 图节点不关心数据来自本地 JSON 还是 akshare。
     def fetch_fund(self, fund_code: str) -> dict[str, Any]:
         ...
 
@@ -39,70 +37,78 @@ class FixtureFundDataSource:
             "nav": float(fund["nav"]),
             "history": history,
             "trend": summarize_trend(history),
+            # basic 是基金档案：基金公司、经理、类型、规模这些，报告节点会用到。
+            "basic": fund.get("basic", {}),
         }
 
 
-class WebFundDataSource:
-    PINGZHONG_URL = "https://fund.eastmoney.com/pingzhongdata/{code}.js"
+def _clean_cell(value: Any) -> str | None:
+    # akshare 返回的表格里，空值可能是 NaN/NaT，统一转成 None，别让 "nan" 混进报告。
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    text = str(value).strip()
+    return text or None
 
-    def _request_text(self, fund_code: str) -> str:
-        url = self.PINGZHONG_URL.format(code=fund_code)
-        request = urllib.request.Request(
-            url,
-            headers={
-                # 给一个正常的浏览器标识，只做低频公开数据读取，不做绕过反爬的事情。
-                "User-Agent": "Mozilla/5.0 FundAgent/0.1 personal-low-frequency-script"
-            },
-        )
 
-        last_error: Exception | None = None
-
-        for attempt in range(HTTP_RETRIES):
-            try:
-                with urllib.request.urlopen(request, timeout=10) as response:
-                    # 天天基金这个接口通常是 utf-8 编码。
-                    return response.read().decode("utf-8")
-            except (urllib.error.URLError, TimeoutError) as exc:
-                last_error = exc
-                # 简单退避，避免网络刚抖一下立刻连续打请求。
-                time.sleep(0.5 * (attempt + 1))
-
-        raise RuntimeError(f"读取基金 {fund_code} 公开数据失败") from last_error
-
-    @staticmethod
-    def _parse_pingzhong(script_text: str) -> tuple[str, list[float]]:
-        # 基金名称在 pingzhongdata 里形如：var fS_name = "xxx";
-        name_match = re.search(r'var\s+fS_name\s*=\s*"(.*?)";', script_text)
-        fund_name = name_match.group(1) if name_match else "未知基金"
-
-        # 历史净值在 Data_netWorthTrend 中，每一项形如 {"x":..., "y":1.234}
-        trend_match = re.search(
-            r"var\s+Data_netWorthTrend\s*=\s*(\[.*?]);",
-            script_text,
-            flags=re.S,
-        )
-
-        if trend_match is None:
-            raise ValueError("没有解析到历史净值数据")
-
-        trend_data = json.loads(trend_match.group(1))
-        history = [float(item["y"]) for item in trend_data if item.get("y") is not None]
-
-        if not history:
-            raise ValueError("历史净值数据为空")
-
-        return fund_name, history
-
+class AkShareFundDataSource:
+    # 真实数据源：基金档案走雪球接口，净值走势走东方财富接口，akshare 都已经封装好了。
     def fetch_fund(self, fund_code: str) -> dict[str, Any]:
-        script_text = self._request_text(fund_code)
-        fund_name, history = self._parse_pingzhong(script_text)
+        import akshare as ak
+        import pandas as pd
+
+        # 1. 基金档案（保持不变）
+        basic_df = ak.fund_individual_basic_info_xq(symbol=fund_code)
+        if basic_df is None or basic_df.empty:
+            raise ValueError(f"未查询到基金 {fund_code}，请确认 6 位基金代码是否正确")
+
+        basic = {
+            str(item): _clean_cell(value)
+            for item, value in zip(basic_df["item"], basic_df["value"])
+        }
+        fund_name = basic.get("基金名称") or "未知基金"
+
+        # 2. 历史净值走势
+        nav_df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        if nav_df is None or nav_df.empty:
+            raise ValueError(f"未获取到基金 {fund_code} 的历史净值数据")
+
+        # 按近一个月过滤，并保留日期 ----
+        # 确保“净值日期”是 datetime 类型，便于比较
+        nav_df["净值日期"] = pd.to_datetime(nav_df["净值日期"])
+
+        # 计算一个月前的日期（用 30 天近似“近一月”）
+        start_date = datetime.now() - timedelta(days=30)
+        recent_df = nav_df[nav_df["净值日期"] >= start_date].copy()
+
+        # 如果近一月无数据（极端情况，如新基金），回退到最后一条
+        if recent_df.empty:
+            recent_df = nav_df.tail(1).copy()
+
+        # 构造带日期的 history：列表中的每个元素是 {"date": "...", "nav": ...}
+        history = [
+            {
+                "date": row["净值日期"].strftime("%Y-%m-%d"),
+                "nav": float(row["单位净值"]),
+            }
+            for _, row in recent_df.iterrows()
+        ]
+
+        # 最新净值取过滤后数据的最后一条（或全量数据的最后一条均可，这里取 recent_df）
+        latest_nav = history[-1]["nav"]
+
+        # 如果 summarize_trend 只接受纯净值列表，可传 [h["nav"] for h in history]
+        # 若它也能处理带日期结构，直接传 history 即可。这里假定它仍需要纯数值列表。
+        nav_values_only = [h["nav"] for h in history]
 
         return {
             "fund_code": fund_code,
             "fund_name": fund_name,
-            "nav": history[-1],
-            "history": history,
-            "trend": summarize_trend(history),
+            "nav": latest_nav,
+            "history": history,  # 带日期的近一月数据
+            "trend": summarize_trend(nav_values_only),  # 根据原有函数签名调整
+            "basic": basic,
         }
 
 
@@ -114,4 +120,4 @@ def get_fund_data_source() -> FundDataSource:
     if USE_FIXTURES:
         return FixtureFundDataSource()
 
-    return WebFundDataSource()
+    return AkShareFundDataSource()

@@ -1,8 +1,14 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+# 加载环境变量
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ENV_PATH)
 
 from app.api.router import api_router
 from app.core.config import API_PREFIX
@@ -14,7 +20,6 @@ from app.db.init_db import init_database
 async def lifespan(_: FastAPI):
     init_database()
     yield
-
 
 app = FastAPI(
     title="Fund Agent API",
