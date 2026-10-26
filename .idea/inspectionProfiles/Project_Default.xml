@@ -1,0 +1,40 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="langchain" />
+          <option value="langchain-core" />
+          <option value="langchain-openai" />
+          <option value="openai" />
+          <option value="python-dotenv" />
+          <option value="pydantic" />
+          <option value="httpx" />
+          <option value="langchain-community" />
+          <option value="langchain-deepseek" />
+          <option value="langchain-ollama" />
+          <option value="dashscope" />
+          <option value="loguru" />
+          <option value="grandalf" />
+          <option value="redis" />
+          <option value="langchain-redis" />
+          <option value="pypdf" />
+          <option value="unstructured" />
+          <option value="python-docx" />
+          <option value="docx2txt" />
+          <option value="markdown" />
+          <option value="jq" />
+          <option value="langchain-unstructured" />
+          <option value="mcp" />
+          <option value="langchain-classic" />
+          <option value="langchain-mcp-adapters" />
+          <option value="langgraph" />
+          <option value="langgraph-checkpoint-sqlite" />
+          <option value="langgraph-supervisor" />
+          <option value="black" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
